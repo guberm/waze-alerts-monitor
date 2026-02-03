@@ -1,0 +1,1 @@
+This file tracks the APK releases. Download the APK from GitHub Releases.

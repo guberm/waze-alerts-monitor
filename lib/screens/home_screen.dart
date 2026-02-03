@@ -52,6 +52,10 @@ class _HomeScreenState extends State<HomeScreen> {
   Timer? monitoringTimer;
   Set<String> announcedAlerts = {};
 
+  // Countdown timer
+  Timer? countdownTimer;
+  int secondsUntilRefresh = 0;
+
   @override
   void initState() {
     super.initState();
@@ -316,13 +320,31 @@ class _HomeScreenState extends State<HomeScreen> {
     // Start real-time location tracking
     _startLocationTracking();
 
+    // Initialize countdown
+    secondsUntilRefresh = refreshInterval;
+
+    // Start countdown timer (updates every second)
+    countdownTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) {
+        setState(() {
+          if (secondsUntilRefresh > 0) {
+            secondsUntilRefresh--;
+          }
+        });
+      }
+    });
+
     // Periodic alert fetching based on refresh interval
     monitoringTimer =
         Timer.periodic(Duration(seconds: refreshInterval), (_) async {
       if (currentPosition != null) {
+        setState(() => secondsUntilRefresh = refreshInterval);
         await _fetchAlerts();
       }
     });
+
+    // Initial fetch
+    await _fetchAlerts();
   }
 
   void _startLocationTracking() {
@@ -352,10 +374,33 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _stopMonitoring() {
     monitoringTimer?.cancel();
+    countdownTimer?.cancel();
     positionStream?.cancel();
-    setState(() => isMonitoring = false);
+    setState(() {
+      isMonitoring = false;
+      secondsUntilRefresh = 0;
+    });
     flutterLocalNotificationsPlugin.cancel(1);
     _showSnackBar('Monitoring stopped');
+  }
+
+  Future<void> _manualRefresh() async {
+    if (!isMonitoring) {
+      _showSnackBar('Start monitoring first');
+      return;
+    }
+
+    if (currentPosition == null) {
+      _showSnackBar('Location not available');
+      return;
+    }
+
+    // Reset countdown
+    setState(() => secondsUntilRefresh = refreshInterval);
+
+    // Fetch alerts
+    await _fetchAlerts();
+    _showSnackBar('Refreshed');
   }
 
   Future<void> _showMonitoringNotification() async {
@@ -868,6 +913,7 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void dispose() {
     monitoringTimer?.cancel();
+    countdownTimer?.cancel();
     positionStream?.cancel();
     super.dispose();
   }
@@ -944,6 +990,53 @@ class _HomeScreenState extends State<HomeScreen> {
                                 style: const TextStyle(
                                     fontSize: 11, color: Colors.grey),
                               ),
+                              if (isMonitoring) ...[
+                                const SizedBox(height: 8),
+                                Row(
+                                  children: [
+                                    const Icon(Icons.timer,
+                                        size: 16, color: Colors.blue),
+                                    const SizedBox(width: 4),
+                                    Text(
+                                      'Next refresh in: ${_formatCountdown(secondsUntilRefresh)}',
+                                      style: const TextStyle(
+                                        fontSize: 12,
+                                        color: Colors.blue,
+                                        fontWeight: FontWeight.w500,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    InkWell(
+                                      onTap: _manualRefresh,
+                                      child: Container(
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 8, vertical: 4),
+                                        decoration: BoxDecoration(
+                                          color: Colors.blue.withOpacity(0.1),
+                                          borderRadius:
+                                              BorderRadius.circular(12),
+                                        ),
+                                        child: Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: const [
+                                            Icon(Icons.refresh,
+                                                size: 14, color: Colors.blue),
+                                            SizedBox(width: 4),
+                                            Text(
+                                              'Refresh',
+                                              style: TextStyle(
+                                                fontSize: 11,
+                                                color: Colors.blue,
+                                                fontWeight: FontWeight.w500,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ],
                             ],
                           )
                         else
@@ -1059,5 +1152,14 @@ class _HomeScreenState extends State<HomeScreen> {
     });
     _saveConfig();
     _showSnackBar('All dismissed alerts cleared');
+  }
+
+  String _formatCountdown(int seconds) {
+    if (seconds >= 60) {
+      final minutes = seconds ~/ 60;
+      final secs = seconds % 60;
+      return '${minutes}m ${secs}s';
+    }
+    return '${seconds}s';
   }
 }

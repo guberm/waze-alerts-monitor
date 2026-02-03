@@ -33,13 +33,17 @@ class _HomeScreenState extends State<HomeScreen> {
   List<AlertModel> alerts = [];
   String region = 'row';
   double searchRadius = 1.0; // km
-  int refreshInterval = 1; // minutes
+  int refreshInterval = 60; // seconds (default 60s = 1 min)
   bool isDarkMode = false;
   bool showPolice = true;
   bool showHazard = true;
   bool showAccident = true;
   bool showSpeedCamera = true;
-  bool showRedLightCamera = true;
+  bool showRedLightCamera = false; // Disabled by default
+  
+  // Address caching
+  Map<String, String> addressCache = {};
+  StreamSubscription<Position>? positionStream;
   
   Timer? monitoringTimer;
   Set<String> announcedAlerts = {};
@@ -73,13 +77,13 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() {
       searchRadius = prefs.getDouble('searchRadius') ?? 1.0;
       region = prefs.getString('region') ?? 'row';
-      refreshInterval = prefs.getInt('refreshInterval') ?? 1;
+      refreshInterval = prefs.getInt('refreshInterval') ?? 60; // Default 60 seconds
       isDarkMode = prefs.getBool('isDarkMode') ?? false;
       showPolice = prefs.getBool('showPolice') ?? true;
       showHazard = prefs.getBool('showHazard') ?? true;
       showAccident = prefs.getBool('showAccident') ?? true;
       showSpeedCamera = prefs.getBool('showSpeedCamera') ?? true;
-      showRedLightCamera = prefs.getBool('showRedLightCamera') ?? true;
+      showRedLightCamera = prefs.getBool('showRedLightCamera') ?? false; // Default disabled
     });
   }
 
@@ -172,6 +176,17 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _getAddressFromCoordinates(double lat, double lon) async {
+    // Create cache key with 3 decimal precision (~ 100m accuracy)
+    final cacheKey = '${lat.toStringAsFixed(3)},${lon.toStringAsFixed(3)}';
+    
+    // Check cache first
+    if (addressCache.containsKey(cacheKey)) {
+      setState(() {
+        currentAddress = addressCache[cacheKey]!;
+      });
+      return;
+    }
+    
     try {
       final url = 'https://nominatim.openstreetmap.org/reverse?format=json&lat=$lat&lon=$lon&zoom=18&addressdetails=1';
       final response = await http.get(
@@ -181,9 +196,16 @@ class _HomeScreenState extends State<HomeScreen> {
       
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
+        final address = data['display_name'] ?? 'Unknown location';
         setState(() {
-          currentAddress = data['display_name'] ?? 'Unknown location';
+          currentAddress = address;
         });
+        // Cache the address
+        addressCache[cacheKey] = address;
+        // Limit cache size to prevent memory issues
+        if (addressCache.length > 50) {
+          addressCache.remove(addressCache.keys.first);
+        }
       }
     } catch (e) {
       setState(() => currentAddress = 'Address not available');
@@ -262,21 +284,51 @@ class _HomeScreenState extends State<HomeScreen> {
 
     setState(() => isMonitoring = true);
     announcedAlerts.clear();
-    _showSnackBar('Monitoring started (every $refreshInterval min)');
+    final intervalText = refreshInterval < 60 ? '$refreshInterval sec' : '${(refreshInterval / 60).toStringAsFixed(0)} min';
+    _showSnackBar('Monitoring started (every $intervalText)');
     
     // Show persistent notification
     _showMonitoringNotification();
 
-    monitoringTimer = Timer.periodic(Duration(minutes: refreshInterval), (_) async {
-      await _getCurrentLocation();
+    // Start real-time location tracking
+    _startLocationTracking();
+
+    // Periodic alert fetching based on refresh interval
+    monitoringTimer = Timer.periodic(Duration(seconds: refreshInterval), (_) async {
       if (currentPosition != null) {
         await _fetchAlerts();
       }
     });
   }
+  
+  void _startLocationTracking() {
+    // Real-time location tracking with high accuracy
+    const LocationSettings locationSettings = LocationSettings(
+      accuracy: LocationAccuracy.high,
+      distanceFilter: 50, // Update every 50 meters
+    );
+    
+    positionStream = Geolocator.getPositionStream(
+      locationSettings: locationSettings,
+    ).listen(
+      (Position position) {
+        if (mounted) {
+          setState(() {
+            currentPosition = position;
+          });
+          // Update address with caching
+          _getAddressFromCoordinates(position.latitude, position.longitude);
+        }
+      },
+      onError: (error) {
+        debugPrint('Location stream error: $error');
+      },
+    );
+  }
 
   void _stopMonitoring() {
     monitoringTimer?.cancel();
+    positionStream?.cancel();
     setState(() => isMonitoring = false);
     flutterLocalNotificationsPlugin.cancel(1);
     _showSnackBar('Monitoring stopped');
@@ -299,7 +351,7 @@ class _HomeScreenState extends State<HomeScreen> {
     await flutterLocalNotificationsPlugin.show(
       1,
       'Waze Alerts Monitoring',
-      'Monitoring active - $refreshInterval min interval',
+      'Monitoring active - ${refreshInterval < 60 ? "$refreshInterval sec" : "${(refreshInterval / 60).toStringAsFixed(0)} min"} interval',
       platformChannelSpecifics,
     );
   }
@@ -605,17 +657,49 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
                 const SizedBox(height: 16),
                 const Text('Refresh Interval', style: TextStyle(fontWeight: FontWeight.bold)),
-                Slider(
-                  value: tempInterval.toDouble(),
-                  min: 1,
-                  max: 10,
-                  divisions: 9,
-                  label: '$tempInterval min',
-                  onChanged: (value) {
-                    setDialogState(() => tempInterval = value.toInt());
-                  },
+                const SizedBox(height: 8),
+                Text(
+                  tempInterval < 60 
+                    ? '$tempInterval seconds' 
+                    : '${(tempInterval / 60).toStringAsFixed(0)} minute(s)',
+                  style: const TextStyle(fontWeight: FontWeight.w500, fontSize: 16),
                 ),
-                Text('$tempInterval minute(s)'),
+                const SizedBox(height: 12),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  alignment: WrapAlignment.center,
+                  children: [
+                    // 10s - 60s by 10s
+                    for (int seconds in [10, 20, 30, 40, 50, 60])
+                      ElevatedButton(
+                        onPressed: () {
+                          setDialogState(() => tempInterval = seconds);
+                        },
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: tempInterval == seconds ? Colors.blue : Colors.grey[300],
+                          foregroundColor: tempInterval == seconds ? Colors.white : Colors.black,
+                          minimumSize: const Size(45, 36),
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                        ),
+                        child: Text('${seconds}s'),
+                      ),
+                    // 2min - 10min by 1min
+                    for (int minutes in [2, 3, 4, 5, 6, 7, 8, 9, 10])
+                      ElevatedButton(
+                        onPressed: () {
+                          setDialogState(() => tempInterval = minutes * 60);
+                        },
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: tempInterval == minutes * 60 ? Colors.blue : Colors.grey[300],
+                          foregroundColor: tempInterval == minutes * 60 ? Colors.white : Colors.black,
+                          minimumSize: const Size(45, 36),
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                        ),
+                        child: Text('${minutes}m'),
+                      ),
+                  ],
+                ),
                 const SizedBox(height: 16),
                 const Text('Region', style: TextStyle(fontWeight: FontWeight.bold)),
                 const Text('(Auto-detected by GPS)', style: TextStyle(fontSize: 12, color: Colors.grey)),
@@ -712,8 +796,10 @@ class _HomeScreenState extends State<HomeScreen> {
     _showSnackBar('Radius: ${(searchRadius * 1000).toInt()}m');
   }
 
+  @override
   void dispose() {
     monitoringTimer?.cancel();
+    positionStream?.cancel();
     super.dispose();
   }
 

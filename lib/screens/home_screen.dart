@@ -324,22 +324,19 @@ class _HomeScreenState extends State<HomeScreen> {
     secondsUntilRefresh = refreshInterval;
 
     // Start countdown timer (updates every second)
-    countdownTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (mounted) {
-        setState(() {
-          if (secondsUntilRefresh > 0) {
+    countdownTimer = Timer.periodic(const Duration(seconds: 1), (_) async {
+      if (mounted && isMonitoring) {
+        if (secondsUntilRefresh > 0) {
+          setState(() {
             secondsUntilRefresh--;
+          });
+        } else {
+          // Time to refresh! Reset countdown and fetch alerts
+          setState(() => secondsUntilRefresh = refreshInterval);
+          if (currentPosition != null) {
+            await _fetchAlerts();
           }
-        });
-      }
-    });
-
-    // Periodic alert fetching based on refresh interval
-    monitoringTimer =
-        Timer.periodic(Duration(seconds: refreshInterval), (_) async {
-      if (currentPosition != null) {
-        setState(() => secondsUntilRefresh = refreshInterval);
-        await _fetchAlerts();
+        }
       }
     });
 

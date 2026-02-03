@@ -13,7 +13,7 @@ import '../models/alert_model.dart';
 
 class HomeScreen extends StatefulWidget {
   final Function(bool)? onThemeChanged;
-  
+
   const HomeScreen({Key? key, this.onThemeChanged}) : super(key: key);
 
   @override
@@ -25,7 +25,7 @@ class _HomeScreenState extends State<HomeScreen> {
   late WazeService wazeService;
   late SharedPreferences prefs;
   late FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin;
-  
+
   bool isMonitoring = false;
   bool isLoadingLocation = false;
   Position? currentPosition;
@@ -39,12 +39,16 @@ class _HomeScreenState extends State<HomeScreen> {
   bool showHazard = true;
   bool showAccident = true;
   bool showSpeedCamera = true;
-  bool showRedLightCamera = false; // Disabled by default
-  
+  bool showRedLightCamera = true; // Enabled by default
+
   // Address caching
   Map<String, String> addressCache = {};
   StreamSubscription<Position>? positionStream;
-  
+
+  // Dismissed alerts (to avoid repeated notifications)
+  Set<String> dismissedAlerts = {};
+
+  // Monitoring state
   Timer? monitoringTimer;
   Set<String> announcedAlerts = {};
 
@@ -77,13 +81,18 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() {
       searchRadius = prefs.getDouble('searchRadius') ?? 1.0;
       region = prefs.getString('region') ?? 'row';
-      refreshInterval = prefs.getInt('refreshInterval') ?? 60; // Default 60 seconds
+      refreshInterval =
+          prefs.getInt('refreshInterval') ?? 60; // Default 60 seconds
       isDarkMode = prefs.getBool('isDarkMode') ?? false;
       showPolice = prefs.getBool('showPolice') ?? true;
       showHazard = prefs.getBool('showHazard') ?? true;
       showAccident = prefs.getBool('showAccident') ?? true;
       showSpeedCamera = prefs.getBool('showSpeedCamera') ?? true;
-      showRedLightCamera = prefs.getBool('showRedLightCamera') ?? false; // Default disabled
+      showRedLightCamera =
+          prefs.getBool('showRedLightCamera') ?? true; // Enabled by default
+      // Load dismissed alerts
+      final dismissedList = prefs.getStringList('dismissedAlerts') ?? [];
+      dismissedAlerts = Set<String>.from(dismissedList);
     });
   }
 
@@ -97,6 +106,7 @@ class _HomeScreenState extends State<HomeScreen> {
     await prefs.setBool('showAccident', showAccident);
     await prefs.setBool('showSpeedCamera', showSpeedCamera);
     await prefs.setBool('showRedLightCamera', showRedLightCamera);
+    await prefs.setStringList('dismissedAlerts', dismissedAlerts.toList());
   }
 
   Future<void> _initializeTTS() async {
@@ -104,7 +114,7 @@ class _HomeScreenState extends State<HomeScreen> {
     await flutterTts.setSpeechRate(0.8);
     await flutterTts.setVolume(1.0);
     await flutterTts.setPitch(1.0);
-    
+
     flutterTts.setCompletionHandler(() {
       if (mounted) {
         setState(() {});
@@ -115,20 +125,21 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _requestPermissions() async {
     // Check current permission status first
     var locationStatus = await Permission.location.status;
-    
+
     bool needsRequest = false;
-    
+
     // Only request if not granted
     if (!locationStatus.isGranted) {
       locationStatus = await Permission.location.request();
       needsRequest = true;
     }
-    
+
     // Show dialog only if we asked AND were denied
     if (needsRequest && !locationStatus.isGranted) {
-      _showDialog('Permissions Required', 'Location permission is needed for this app to work.');
+      _showDialog('Permissions Required',
+          'Location permission is needed for this app to work.');
     }
-    
+
     // Auto-start monitoring if location permission is granted
     if (locationStatus.isGranted) {
       // Wait longer for location services to be ready
@@ -147,7 +158,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _getCurrentLocation() async {
     try {
       setState(() => isLoadingLocation = true);
-      
+
       final position = await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.high,
       ).timeout(
@@ -156,19 +167,20 @@ class _HomeScreenState extends State<HomeScreen> {
           throw Exception('Location request timed out');
         },
       );
-      
+
       setState(() {
         currentPosition = position;
         isLoadingLocation = false;
       });
-      
+
       // Get address
       await _getAddressFromCoordinates(position.latitude, position.longitude);
-      
+
       // Auto-detect region
       _detectRegion(position.latitude, position.longitude);
-      
-      _showSnackBar('Location: ${position.latitude.toStringAsFixed(4)}, ${position.longitude.toStringAsFixed(4)}');
+
+      _showSnackBar(
+          'Location: ${position.latitude.toStringAsFixed(4)}, ${position.longitude.toStringAsFixed(4)}');
     } catch (e) {
       setState(() => isLoadingLocation = false);
       _showSnackBar('Error getting location: $e');
@@ -178,7 +190,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _getAddressFromCoordinates(double lat, double lon) async {
     // Create cache key with 3 decimal precision (~ 100m accuracy)
     final cacheKey = '${lat.toStringAsFixed(3)},${lon.toStringAsFixed(3)}';
-    
+
     // Check cache first
     if (addressCache.containsKey(cacheKey)) {
       setState(() {
@@ -186,14 +198,15 @@ class _HomeScreenState extends State<HomeScreen> {
       });
       return;
     }
-    
+
     try {
-      final url = 'https://nominatim.openstreetmap.org/reverse?format=json&lat=$lat&lon=$lon&zoom=18&addressdetails=1';
+      final url =
+          'https://nominatim.openstreetmap.org/reverse?format=json&lat=$lat&lon=$lon&zoom=18&addressdetails=1';
       final response = await http.get(
         Uri.parse(url),
         headers: {'User-Agent': 'WazeAlertsApp/1.0'},
       ).timeout(const Duration(seconds: 5));
-      
+
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         final address = data['display_name'] ?? 'Unknown location';
@@ -241,10 +254,18 @@ class _HomeScreenState extends State<HomeScreen> {
       final left = currentPosition!.longitude - radius;
       final right = currentPosition!.longitude + radius;
 
-      final data = await wazeService.fetchAlerts(top, bottom, left, right, region);
-      
+      final data =
+          await wazeService.fetchAlerts(top, bottom, left, right, region);
+
       // Filter alerts based on user preferences
       final filteredAlerts = data.where((alert) {
+        // Check if alert is dismissed first
+        final alertKey =
+            '${alert.type}_${alert.latitude?.toStringAsFixed(3)}_${alert.longitude?.toStringAsFixed(3)}';
+        if (dismissedAlerts.contains(alertKey)) {
+          return false; // Skip dismissed alerts
+        }
+
         switch (alert.type) {
           case 'POLICE':
             return showPolice;
@@ -260,7 +281,7 @@ class _HomeScreenState extends State<HomeScreen> {
             return true;
         }
       }).toList();
-      
+
       setState(() {
         alerts = filteredAlerts;
       });
@@ -284,9 +305,11 @@ class _HomeScreenState extends State<HomeScreen> {
 
     setState(() => isMonitoring = true);
     announcedAlerts.clear();
-    final intervalText = refreshInterval < 60 ? '$refreshInterval sec' : '${(refreshInterval / 60).toStringAsFixed(0)} min';
+    final intervalText = refreshInterval < 60
+        ? '$refreshInterval sec'
+        : '${(refreshInterval / 60).toStringAsFixed(0)} min';
     _showSnackBar('Monitoring started (every $intervalText)');
-    
+
     // Show persistent notification
     _showMonitoringNotification();
 
@@ -294,20 +317,21 @@ class _HomeScreenState extends State<HomeScreen> {
     _startLocationTracking();
 
     // Periodic alert fetching based on refresh interval
-    monitoringTimer = Timer.periodic(Duration(seconds: refreshInterval), (_) async {
+    monitoringTimer =
+        Timer.periodic(Duration(seconds: refreshInterval), (_) async {
       if (currentPosition != null) {
         await _fetchAlerts();
       }
     });
   }
-  
+
   void _startLocationTracking() {
     // Real-time location tracking with high accuracy
     const LocationSettings locationSettings = LocationSettings(
       accuracy: LocationAccuracy.high,
       distanceFilter: 50, // Update every 50 meters
     );
-    
+
     positionStream = Geolocator.getPositionStream(
       locationSettings: locationSettings,
     ).listen(
@@ -347,7 +371,7 @@ class _HomeScreenState extends State<HomeScreen> {
     );
     const NotificationDetails platformChannelSpecifics =
         NotificationDetails(android: androidPlatformChannelSpecifics);
-    
+
     await flutterLocalNotificationsPlugin.show(
       1,
       'Waze Alerts Monitoring',
@@ -358,11 +382,11 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _updateMonitoringNotification() async {
     if (alerts.isEmpty || currentPosition == null) return;
-    
+
     // Find closest alert
     AlertModel? closestAlert;
     double closestDistance = double.infinity;
-    
+
     for (final alert in alerts) {
       if (alert.latitude != null && alert.longitude != null) {
         final distance = Geolocator.distanceBetween(
@@ -371,14 +395,14 @@ class _HomeScreenState extends State<HomeScreen> {
           alert.latitude!,
           alert.longitude!,
         );
-        
+
         if (distance < closestDistance) {
           closestDistance = distance;
           closestAlert = alert;
         }
       }
     }
-    
+
     if (closestAlert != null) {
       String typeEmoji = '';
       switch (closestAlert.type) {
@@ -400,11 +424,11 @@ class _HomeScreenState extends State<HomeScreen> {
         default:
           typeEmoji = '📍';
       }
-      
+
       final distanceKm = (closestDistance / 1000).toStringAsFixed(1);
       final notificationTitle = '$typeEmoji ${closestAlert.type}';
       final notificationBody = '${closestAlert.street} (${distanceKm}km away)';
-      
+
       const AndroidNotificationDetails androidPlatformChannelSpecifics =
           AndroidNotificationDetails(
         'waze_alerts_channel',
@@ -417,7 +441,7 @@ class _HomeScreenState extends State<HomeScreen> {
       );
       const NotificationDetails platformChannelSpecifics =
           NotificationDetails(android: androidPlatformChannelSpecifics);
-      
+
       await flutterLocalNotificationsPlugin.show(
         1,
         notificationTitle,
@@ -430,13 +454,13 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _announceAlerts() async {
     for (final alert in alerts) {
       final alertKey = '${alert.type}_${alert.street}_${alert.city}';
-      
+
       if (!announcedAlerts.contains(alertKey)) {
         announcedAlerts.add(alertKey);
-        
+
         final message = _buildAlertMessage(alert);
         await flutterTts.speak(message);
-        
+
         // Wait for speech to complete
         await Future.delayed(const Duration(milliseconds: 500));
       }
@@ -471,18 +495,21 @@ class _HomeScreenState extends State<HomeScreen> {
     try {
       // Try native Waze scheme first
       final wazeUrl = 'waze://?ll=${alert.latitude},${alert.longitude}';
-      final fallbackUrl = 'https://waze.com/ul?ll=${alert.latitude},${alert.longitude}';
-      
+      final fallbackUrl =
+          'https://waze.com/ul?ll=${alert.latitude},${alert.longitude}';
+
       try {
         if (await canLaunchUrl(Uri.parse(wazeUrl))) {
           await launchUrl(Uri.parse(wazeUrl));
         } else {
           // Fallback to web URL
-          await launchUrl(Uri.parse(fallbackUrl), mode: LaunchMode.externalApplication);
+          await launchUrl(Uri.parse(fallbackUrl),
+              mode: LaunchMode.externalApplication);
         }
       } catch (e) {
         // If waze scheme fails, use web URL
-        await launchUrl(Uri.parse(fallbackUrl), mode: LaunchMode.externalApplication);
+        await launchUrl(Uri.parse(fallbackUrl),
+            mode: LaunchMode.externalApplication);
       }
     } catch (e) {
       _showSnackBar('Could not open Waze: $e');
@@ -522,7 +549,8 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text('Menu', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+            const Text('Menu',
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
             const SizedBox(height: 16),
             ListTile(
               title: const Text('Settings'),
@@ -532,10 +560,20 @@ class _HomeScreenState extends State<HomeScreen> {
               },
             ),
             ListTile(
+              leading: const Icon(Icons.clear_all),
+              title: Text('Clear Dismissed Alerts (${dismissedAlerts.length})'),
+              enabled: dismissedAlerts.isNotEmpty,
+              onTap: () {
+                Navigator.pop(context);
+                _clearDismissedAlerts();
+              },
+            ),
+            ListTile(
               title: const Text('About'),
               onTap: () {
                 Navigator.pop(context);
-                _showDialog('About', 'Waze Alerts Monitor v1.0.0\n\nReal-time alert notifications with voice');
+                _showDialog('About',
+                    'Waze Alerts Monitor v1.0.2\n\nReal-time alert notifications with voice');
               },
             ),
             ListTile(
@@ -561,7 +599,7 @@ class _HomeScreenState extends State<HomeScreen> {
     bool tempShowAccident = showAccident;
     bool tempShowSpeedCamera = showSpeedCamera;
     bool tempShowRedLightCamera = showRedLightCamera;
-    
+
     showDialog(
       context: context,
       builder: (context) => StatefulBuilder(
@@ -574,7 +612,8 @@ class _HomeScreenState extends State<HomeScreen> {
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    const Text('Dark Mode', style: TextStyle(fontWeight: FontWeight.bold)),
+                    const Text('Dark Mode',
+                        style: TextStyle(fontWeight: FontWeight.bold)),
                     Switch(
                       value: tempDarkMode,
                       onChanged: (value) {
@@ -592,7 +631,8 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
                 const Divider(),
                 const SizedBox(height: 8),
-                const Text('Alert Notifications', style: TextStyle(fontWeight: FontWeight.bold)),
+                const Text('Alert Notifications',
+                    style: TextStyle(fontWeight: FontWeight.bold)),
                 const SizedBox(height: 8),
                 CheckboxListTile(
                   title: const Text('🚔 Police'),
@@ -626,28 +666,44 @@ class _HomeScreenState extends State<HomeScreen> {
                   title: const Text('🚦 Red Light Camera'),
                   value: tempShowRedLightCamera,
                   onChanged: (value) {
-                    setDialogState(() => tempShowRedLightCamera = value ?? true);
+                    setDialogState(
+                        () => tempShowRedLightCamera = value ?? true);
                   },
                 ),
                 const Divider(),
                 const SizedBox(height: 8),
-                const Text('Search Radius (km)', style: TextStyle(fontWeight: FontWeight.bold)),
+                const Text('Search Radius (km)',
+                    style: TextStyle(fontWeight: FontWeight.bold)),
                 const SizedBox(height: 8),
-                Text('${tempRadius.toStringAsFixed(1)} km', style: const TextStyle(fontWeight: FontWeight.w500, fontSize: 16)),
+                Text('${tempRadius.toStringAsFixed(1)} km',
+                    style: const TextStyle(
+                        fontWeight: FontWeight.w500, fontSize: 16)),
                 const SizedBox(height: 12),
                 Wrap(
                   spacing: 8,
                   runSpacing: 8,
                   alignment: WrapAlignment.center,
                   children: [
-                    for (double radius in <double>[0.3, 0.5, 1.0, 2.0, 3.0, 4.0, 5.0])
+                    for (double radius in <double>[
+                      0.3,
+                      0.5,
+                      1.0,
+                      2.0,
+                      3.0,
+                      4.0,
+                      5.0
+                    ])
                       ElevatedButton(
                         onPressed: () {
                           setDialogState(() => tempRadius = radius);
                         },
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: (tempRadius - radius).abs() < 0.01 ? Colors.blue : Colors.grey[300],
-                          foregroundColor: (tempRadius - radius).abs() < 0.01 ? Colors.white : Colors.black,
+                          backgroundColor: (tempRadius - radius).abs() < 0.01
+                              ? Colors.blue
+                              : Colors.grey[300],
+                          foregroundColor: (tempRadius - radius).abs() < 0.01
+                              ? Colors.white
+                              : Colors.black,
                           minimumSize: const Size(45, 36),
                           padding: const EdgeInsets.symmetric(horizontal: 8),
                         ),
@@ -656,13 +712,15 @@ class _HomeScreenState extends State<HomeScreen> {
                   ],
                 ),
                 const SizedBox(height: 16),
-                const Text('Refresh Interval', style: TextStyle(fontWeight: FontWeight.bold)),
+                const Text('Refresh Interval',
+                    style: TextStyle(fontWeight: FontWeight.bold)),
                 const SizedBox(height: 8),
                 Text(
-                  tempInterval < 60 
-                    ? '$tempInterval seconds' 
-                    : '${(tempInterval / 60).toStringAsFixed(0)} minute(s)',
-                  style: const TextStyle(fontWeight: FontWeight.w500, fontSize: 16),
+                  tempInterval < 60
+                      ? '$tempInterval seconds'
+                      : '${(tempInterval / 60).toStringAsFixed(0)} minute(s)',
+                  style: const TextStyle(
+                      fontWeight: FontWeight.w500, fontSize: 16),
                 ),
                 const SizedBox(height: 12),
                 Wrap(
@@ -677,8 +735,12 @@ class _HomeScreenState extends State<HomeScreen> {
                           setDialogState(() => tempInterval = seconds);
                         },
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: tempInterval == seconds ? Colors.blue : Colors.grey[300],
-                          foregroundColor: tempInterval == seconds ? Colors.white : Colors.black,
+                          backgroundColor: tempInterval == seconds
+                              ? Colors.blue
+                              : Colors.grey[300],
+                          foregroundColor: tempInterval == seconds
+                              ? Colors.white
+                              : Colors.black,
                           minimumSize: const Size(45, 36),
                           padding: const EdgeInsets.symmetric(horizontal: 8),
                         ),
@@ -691,8 +753,12 @@ class _HomeScreenState extends State<HomeScreen> {
                           setDialogState(() => tempInterval = minutes * 60);
                         },
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: tempInterval == minutes * 60 ? Colors.blue : Colors.grey[300],
-                          foregroundColor: tempInterval == minutes * 60 ? Colors.white : Colors.black,
+                          backgroundColor: tempInterval == minutes * 60
+                              ? Colors.blue
+                              : Colors.grey[300],
+                          foregroundColor: tempInterval == minutes * 60
+                              ? Colors.white
+                              : Colors.black,
                           minimumSize: const Size(45, 36),
                           padding: const EdgeInsets.symmetric(horizontal: 8),
                         ),
@@ -701,15 +767,18 @@ class _HomeScreenState extends State<HomeScreen> {
                   ],
                 ),
                 const SizedBox(height: 16),
-                const Text('Region', style: TextStyle(fontWeight: FontWeight.bold)),
-                const Text('(Auto-detected by GPS)', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                const Text('Region',
+                    style: TextStyle(fontWeight: FontWeight.bold)),
+                const Text('(Auto-detected by GPS)',
+                    style: TextStyle(fontSize: 12, color: Colors.grey)),
                 const SizedBox(height: 8),
                 DropdownButton<String>(
                   value: tempRegion,
                   isExpanded: true,
                   items: const [
                     DropdownMenuItem(value: 'na', child: Text('North America')),
-                    DropdownMenuItem(value: 'row', child: Text('Rest of World')),
+                    DropdownMenuItem(
+                        value: 'row', child: Text('Rest of World')),
                     DropdownMenuItem(value: 'il', child: Text('Israel')),
                   ],
                   onChanged: (value) {
@@ -738,12 +807,12 @@ class _HomeScreenState extends State<HomeScreen> {
                   showRedLightCamera = tempShowRedLightCamera;
                 });
                 _saveConfig();
-                
+
                 // Notify parent widget of theme change
                 if (widget.onThemeChanged != null) {
                   widget.onThemeChanged!(tempDarkMode);
                 }
-                
+
                 Navigator.pop(context);
                 _showSnackBar('Settings saved');
               },
@@ -790,7 +859,7 @@ class _HomeScreenState extends State<HomeScreen> {
     double newRadius = searchRadius + delta;
     if (newRadius < 0.3) newRadius = 0.3;
     if (newRadius > 20) newRadius = 20;
-    
+
     setState(() => searchRadius = newRadius);
     _saveConfig();
     _showSnackBar('Radius: ${(searchRadius * 1000).toInt()}m');
@@ -832,68 +901,78 @@ class _HomeScreenState extends State<HomeScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-              // Location Status
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          const Icon(Icons.location_on, color: Colors.blue),
-                          const SizedBox(width: 8),
-                          const Text('Current Location', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-                        ],
-                      ),
-                      const SizedBox(height: 8),
-                      if (isLoadingLocation)
-                        const Center(child: CircularProgressIndicator())
-                      else if (currentPosition != null)
-                        Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
+                // Location Status
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
                           children: [
-                            Text(
-                              currentAddress.isNotEmpty ? currentAddress : 'Loading address...',
-                              style: const TextStyle(fontSize: 14),
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              '${currentPosition!.latitude.toStringAsFixed(4)}, ${currentPosition!.longitude.toStringAsFixed(4)}',
-                              style: const TextStyle(fontSize: 12, color: Colors.grey, fontFamily: 'monospace'),
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              'Region: ${region == 'na' ? 'North America' : region == 'il' ? 'Israel' : 'Rest of World'} • Radius: ${searchRadius.toStringAsFixed(1)}km',
-                              style: const TextStyle(fontSize: 11, color: Colors.grey),
-                            ),
+                            const Icon(Icons.location_on, color: Colors.blue),
+                            const SizedBox(width: 8),
+                            const Text('Current Location',
+                                style: TextStyle(
+                                    fontSize: 16, fontWeight: FontWeight.bold)),
                           ],
-                        )
-                      else
-                        const Text('No location obtained'),
-                    ],
+                        ),
+                        const SizedBox(height: 8),
+                        if (isLoadingLocation)
+                          const Center(child: CircularProgressIndicator())
+                        else if (currentPosition != null)
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                currentAddress.isNotEmpty
+                                    ? currentAddress
+                                    : 'Loading address...',
+                                style: const TextStyle(fontSize: 14),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                '${currentPosition!.latitude.toStringAsFixed(4)}, ${currentPosition!.longitude.toStringAsFixed(4)}',
+                                style: const TextStyle(
+                                    fontSize: 12,
+                                    color: Colors.grey,
+                                    fontFamily: 'monospace'),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                'Region: ${region == 'na' ? 'North America' : region == 'il' ? 'Israel' : 'Rest of World'} • Radius: ${searchRadius.toStringAsFixed(1)}km',
+                                style: const TextStyle(
+                                    fontSize: 11, color: Colors.grey),
+                              ),
+                            ],
+                          )
+                        else
+                          const Text('No location obtained'),
+                      ],
+                    ),
                   ),
                 ),
-              ),
-              const SizedBox(height: 16),
+                const SizedBox(height: 16),
 
-              const SizedBox(height: 16),
+                const SizedBox(height: 16),
 
-              // Alerts List
-              if (alerts.isNotEmpty)
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text('Alerts (${alerts.length})', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-                    const SizedBox(height: 8),
-                    ...alerts.map((alert) => _buildAlertCard(alert)),
-                  ],
-                )
-              else
-                const Text('No alerts to display'),
-            ],
+                // Alerts List
+                if (alerts.isNotEmpty)
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Alerts (${alerts.length})',
+                          style: const TextStyle(
+                              fontSize: 16, fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 8),
+                      ...alerts.map((alert) => _buildAlertCard(alert)),
+                    ],
+                  )
+                else
+                  const Text('No alerts to display'),
+              ],
+            ),
           ),
-        ),
         ),
       ),
     );
@@ -923,7 +1002,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
     // Calculate distance from current location
     String distanceText = 'N/A';
-    if (currentPosition != null && alert.latitude != null && alert.longitude != null) {
+    if (currentPosition != null &&
+        alert.latitude != null &&
+        alert.longitude != null) {
       final distanceInMeters = Geolocator.distanceBetween(
         currentPosition!.latitude,
         currentPosition!.longitude,
@@ -940,9 +1021,43 @@ class _HomeScreenState extends State<HomeScreen> {
         leading: Icon(icon, color: color),
         title: Text(alert.type),
         subtitle: Text('${alert.street}, ${alert.city}'),
-        trailing: Text(distanceText, style: const TextStyle(fontSize: 12)),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(distanceText, style: const TextStyle(fontSize: 12)),
+            const SizedBox(width: 8),
+            IconButton(
+              icon: const Icon(Icons.close, size: 20),
+              tooltip: 'Dismiss this alert',
+              onPressed: () => _dismissAlert(alert),
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(),
+            ),
+          ],
+        ),
         onTap: () => _openWazeNavigation(alert),
       ),
     );
+  }
+
+  void _dismissAlert(AlertModel alert) {
+    final alertKey =
+        '${alert.type}_${alert.latitude?.toStringAsFixed(3)}_${alert.longitude?.toStringAsFixed(3)}';
+    setState(() {
+      dismissedAlerts.add(alertKey);
+      alerts.removeWhere((a) =>
+          '${a.type}_${a.latitude?.toStringAsFixed(3)}_${a.longitude?.toStringAsFixed(3)}' ==
+          alertKey);
+    });
+    _saveConfig();
+    _showSnackBar('Alert dismissed');
+  }
+
+  void _clearDismissedAlerts() {
+    setState(() {
+      dismissedAlerts.clear();
+    });
+    _saveConfig();
+    _showSnackBar('All dismissed alerts cleared');
   }
 }

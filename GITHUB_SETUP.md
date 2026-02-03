@@ -22,7 +22,7 @@
 Replace `<YOUR_USERNAME>` with your actual GitHub username:
 
 ```bash
-cd "C:\Users\michael.guber\Desktop\Waze Notification\waze_alerts_new"
+cd "C:\Users\USER\Desktop\Waze Notification\waze_alerts_new"
 
 # Add GitHub remote
 git remote add origin https://github.com/<YOUR_USERNAME>/waze-alerts-monitor.git
@@ -57,7 +57,7 @@ If you have GitHub CLI installed:
 ```bash
 gh auth login  # Follow prompts to authenticate
 
-cd "C:\Users\michael.guber\Desktop\Waze Notification\waze_alerts_new"
+cd "C:\Users\USER\Desktop\Waze Notification\waze_alerts_new"
 
 # Create repo and push in one command
 gh repo create waze-alerts-monitor --public --source=. --remote=origin --push
@@ -92,7 +92,7 @@ gh repo create waze-alerts-monitor --public --source=. --remote=origin --push
 To push updates after making changes:
 
 ```bash
-cd "C:\Users\michael.guber\Desktop\Waze Notification\waze_alerts_new"
+cd "C:\Users\USER\Desktop\Waze Notification\waze_alerts_new"
 
 # Check what changed
 git status
